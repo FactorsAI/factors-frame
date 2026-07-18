@@ -2,3 +2,5 @@ flask
 pillow
 requests
 gunicorn
+numpy
+opencv-python-headless
