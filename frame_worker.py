@@ -1,15 +1,24 @@
 # Factors speaker framing worker
-# POST /frame  {"url":"<transparent-or-raw png>","aspect":"wide|story|square","grade":"yes|no"}
-# Returns a PNG: person scaled to a consistent size, bottom-aligned into a fixed slot,
-# optional locked purple grade. No background removal (feed transparent PNGs).
+# POST /frame  {"url":"<transparent png>","aspect":"wide|story|square","grade":"yes|no"}
+# Normalizes each speaker by HEAD HEIGHT so tight and wide headshots come out the
+# same face size, then bottom-aligns into a fixed slot. Feed transparent PNGs.
 from flask import Flask, request, send_file, jsonify
 from PIL import Image, ImageFilter, ImageChops
 import io, requests
 
 app = Flask(__name__)
 
-ASPECT = {"wide": 0.872, "story": 0.60, "square": 0.78}   # person-frame width/height
+# person-frame width/height per format
+ASPECT = {"wide": 0.872, "story": 0.60, "square": 0.78}
+# fraction of the slot HEIGHT the person should occupy (controls zoom/consistency)
+PERSON_FILL = {"wide": 0.92, "story": 0.72, "square": 0.86}
 PURPLE = (150, 60, 210)
+ALPHA_THRESH = 40   # ignore near-transparent stray pixels when measuring the person
+
+def person_bbox(img):
+    a = img.split()[3]
+    mask = a.point(lambda v: 255 if v >= ALPHA_THRESH else 0)
+    return mask.getbbox() or a.getbbox()
 
 def grade(img):
     img = img.convert("RGBA"); W, H = img.size; a = img.split()[3]
@@ -25,29 +34,35 @@ def grade(img):
     out = Image.alpha_composite(img, sc); out.putalpha(a)
     return out
 
-def frame(person, aspect):
-    bb = person.split()[3].getbbox()
-    if bb: person = person.crop(bb)
+def frame(person, aspect, fill):
+    # tight-crop to the real person (thresholded so stray pixels don't inflate it)
+    person = person.crop(person_bbox(person))
     pw, ph = person.size
-    cw = pw; ch = int(cw / aspect)
-    if ch < ph:
-        ch = ph; cw = int(ch * aspect)
+    # slot sized so the person is `fill` fraction of slot height -> consistent face size
+    ch = int(ph / fill)
+    cw = int(ch * aspect)
+    if cw < pw:                      # never crop the person horizontally
+        cw = pw; ch = int(cw / aspect)
     canvas = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
-    canvas.paste(person, ((cw - pw) // 2, ch - ph), person)
+    x = (cw - pw) // 2
+    y = ch - ph                      # bottom-aligned
+    canvas.paste(person, (x, y), person)
     return canvas
 
 @app.get("/")
 def health():
-    return jsonify(ok=True, service="factors-frame")
+    return jsonify(ok=True, service="factors-frame", version=2)
 
 @app.post("/frame")
 def go():
     d = request.get_json(force=True)
+    fmt = d.get("aspect", "wide")
+    aspect = ASPECT.get(fmt, 0.872)
+    fill = PERSON_FILL.get(fmt, 0.92)
     r = requests.get(d["url"], timeout=30); r.raise_for_status()
     src = Image.open(io.BytesIO(r.content)).convert("RGBA")
-    aspect = ASPECT.get(d.get("aspect", "wide"), 0.872)
     do_grade = str(d.get("grade", "yes")).lower() in ("yes", "true", "1", "on")
-    img = frame(grade(src) if do_grade else src, aspect)
+    img = frame(grade(src) if do_grade else src, aspect, fill)
     buf = io.BytesIO(); img.save(buf, "PNG"); buf.seek(0)
     return send_file(buf, mimetype="image/png")
 
