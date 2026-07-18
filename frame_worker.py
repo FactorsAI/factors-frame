@@ -11,7 +11,7 @@ app = Flask(__name__)
 # person-frame width/height per format
 ASPECT = {"wide": 0.872, "story": 0.60, "square": 0.78}
 # fraction of the slot HEIGHT the person should occupy (controls zoom/consistency)
-PERSON_FILL = {"wide": 0.92, "story": 0.72, "square": 0.86}
+PERSON_FILL = {"wide": 0.78, "story": 0.62, "square": 0.74}
 PURPLE = (150, 60, 210)
 ALPHA_THRESH = 40   # ignore near-transparent stray pixels when measuring the person
 
