@@ -1,0 +1,6 @@
+flask
+pillow
+requests
+gunicorn
+numpy
+opencv-contrib-python-headless==4.10.0.84
