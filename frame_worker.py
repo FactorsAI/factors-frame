@@ -1,24 +1,25 @@
-# Factors speaker framing worker
-# POST /frame  {"url":"<transparent png>","aspect":"wide|story|square","grade":"yes|no"}
-# Normalizes each speaker by HEAD HEIGHT so tight and wide headshots come out the
-# same face size, then bottom-aligns into a fixed slot. Feed transparent PNGs.
+# Factors speaker framing worker (v3)
+# POST /frame {"url","aspect":"wide|story|square","grade":"yes|no"}
+# Strategy: crop to the real person, then place them in a slot whose height is a
+# FIXED multiple of the person's WIDTH (shoulders width ~ consistent across headshots),
+# head pinned near the top. This keeps face size + vertical position consistent even
+# when crops include different amounts of shoulder. Feed transparent PNGs.
 from flask import Flask, request, send_file, jsonify
 from PIL import Image, ImageFilter, ImageChops
 import io, requests
 
 app = Flask(__name__)
-
-# person-frame width/height per format
-ASPECT = {"wide": 0.872, "story": 0.60, "square": 0.78}
-# fraction of the slot HEIGHT the person should occupy (controls zoom/consistency)
-PERSON_FILL = {"wide": 0.78, "story": 0.62, "square": 0.74}
+ASPECT = {"wide": 0.872, "story": 0.60, "square": 0.78}   # slot width/height
+# slot height as a multiple of the person's cropped WIDTH  (bigger = person appears smaller)
+HEIGHT_X_WIDTH = {"wide": 1.85, "story": 2.9, "square": 2.1}
+# gap above the head as a fraction of slot height
+TOP_PAD = {"wide": 0.06, "story": 0.05, "square": 0.06}
 PURPLE = (150, 60, 210)
-ALPHA_THRESH = 40   # ignore near-transparent stray pixels when measuring the person
+ALPHA_THRESH = 40
 
 def person_bbox(img):
-    a = img.split()[3]
-    mask = a.point(lambda v: 255 if v >= ALPHA_THRESH else 0)
-    return mask.getbbox() or a.getbbox()
+    a = img.split()[3].point(lambda v: 255 if v >= ALPHA_THRESH else 0)
+    return a.getbbox() or img.split()[3].getbbox()
 
 def grade(img):
     img = img.convert("RGBA"); W, H = img.size; a = img.split()[3]
@@ -31,38 +32,35 @@ def grade(img):
     t = Image.composite(t, Image.new("RGBA", (W, H), (0, 0, 0, 0)), a)
     sc = ImageChops.screen(img.convert("RGB"), t.convert("RGB")).convert("RGBA")
     sc.putalpha(t.split()[3])
-    out = Image.alpha_composite(img, sc); out.putalpha(a)
-    return out
+    out = Image.alpha_composite(img, sc); out.putalpha(a); return out
 
-def frame(person, aspect, fill):
-    # tight-crop to the real person (thresholded so stray pixels don't inflate it)
+def frame(person, fmt):
     person = person.crop(person_bbox(person))
     pw, ph = person.size
-    # slot sized so the person is `fill` fraction of slot height -> consistent face size
-    ch = int(ph / fill)
+    aspect = ASPECT.get(fmt, 0.872)
+    # slot height keyed off person WIDTH -> consistent face scale
+    ch = int(pw * HEIGHT_X_WIDTH.get(fmt, 1.85))
+    if ch < ph + 2:                       # never clip the person vertically
+        ch = ph + 2
     cw = int(ch * aspect)
-    if cw < pw:                      # never crop the person horizontally
-        cw = pw; ch = int(cw / aspect)
+    if cw < pw: cw = pw                    # never clip horizontally
     canvas = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     x = (cw - pw) // 2
-    y = ch - ph                      # bottom-aligned
+    y = int(ch * TOP_PAD.get(fmt, 0.06))   # head pinned near the top
     canvas.paste(person, (x, y), person)
     return canvas
 
 @app.get("/")
-def health():
-    return jsonify(ok=True, service="factors-frame", version=2)
+def health(): return jsonify(ok=True, service="factors-frame", version=3)
 
 @app.post("/frame")
 def go():
     d = request.get_json(force=True)
     fmt = d.get("aspect", "wide")
-    aspect = ASPECT.get(fmt, 0.872)
-    fill = PERSON_FILL.get(fmt, 0.92)
     r = requests.get(d["url"], timeout=30); r.raise_for_status()
     src = Image.open(io.BytesIO(r.content)).convert("RGBA")
-    do_grade = str(d.get("grade", "yes")).lower() in ("yes", "true", "1", "on")
-    img = frame(grade(src) if do_grade else src, aspect, fill)
+    do_grade = str(d.get("grade", "yes")).lower() in ("yes","true","1","on")
+    img = frame(grade(src) if do_grade else src, fmt)
     buf = io.BytesIO(); img.save(buf, "PNG"); buf.seek(0)
     return send_file(buf, mimetype="image/png")
 
