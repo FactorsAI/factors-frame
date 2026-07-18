@@ -12,6 +12,8 @@ app = Flask(__name__)
 ASPECT = {"wide": 0.872, "story": 0.60, "square": 0.78}   # slot width/height
 # slot height as a multiple of the person's cropped WIDTH  (bigger = person appears smaller)
 HEIGHT_X_WIDTH = {"wide": 1.85, "story": 2.9, "square": 2.1}
+# person height must not exceed this fraction of slot height (caps big-in-frame crops)
+PERSON_MAXFILL = {"wide": 0.82, "story": 0.72, "square": 0.80}
 # gap above the head as a fraction of slot height
 TOP_PAD = {"wide": 0.06, "story": 0.05, "square": 0.06}
 PURPLE = (150, 60, 210)
@@ -39,8 +41,10 @@ def frame(person, fmt):
     pw, ph = person.size
     aspect = ASPECT.get(fmt, 0.872)
     # slot height keyed off person WIDTH -> consistent face scale
+    # scale slot from person WIDTH, but cap so tall/wide crops don't balloon
     ch = int(pw * HEIGHT_X_WIDTH.get(fmt, 1.85))
-    if ch < ph + 2:                       # never clip the person vertically
+    ch = max(ch, int(ph / PERSON_MAXFILL.get(fmt, 0.9)))   # ensure headroom for tall crops
+    if ch < ph + 2:
         ch = ph + 2
     cw = int(ch * aspect)
     if cw < pw: cw = pw                    # never clip horizontally
@@ -51,7 +55,7 @@ def frame(person, fmt):
     return canvas
 
 @app.get("/")
-def health(): return jsonify(ok=True, service="factors-frame", version=3)
+def health(): return jsonify(ok=True, service="factors-frame", version=4)
 
 @app.post("/frame")
 def go():
