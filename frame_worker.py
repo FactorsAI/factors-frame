@@ -10,26 +10,30 @@ import io, requests, numpy as np, cv2
 app = Flask(__name__)
 
 # plate size per format (aspect must match the template slot)
-CANVAS = {"wide": (760, 900), "story": (640, 720), "square": (600, 600)}
+CANVAS = {"wide": (760, 900), "story": (2160, 3840), "square": (600, 600)}
 # face height as fraction of plate height (calibrated to the approved reference)
-FACE_FILL = {"wide": 0.36, "story": 0.62, "square": 0.44}
+FACE_FILL = {"wide": 0.36, "story": 0.202, "square": 0.44}
 # face CENTER vertical position as fraction of plate height
 # square 0.58 (v13): matches where short/width-capped speakers settle after the drop-to-bottom,
 # so tall slim speakers (who never trigger the drop) line up at the same face height.
-FACE_CY   = {"wide": 0.63, "story": 0.42, "square": 0.58}
+FACE_CY   = {"wide": 0.63, "story": 0.37, "square": 0.58}
 # person width must not exceed this fraction of plate width (keeps inner shoulder in frame)
-WIDTH_MARGIN = {"wide": 0.98, "story": 0.98, "square": 0.96}
+WIDTH_MARGIN = {"wide": 0.98, "story": 3.0, "square": 0.96}
 # formats where the person is anchored flush to the plate bottom (no floating gap)
 BOTTOM_ANCHOR = set()
 # formats where a short-torso crop is extended (shirt stretched) to reach the plate bottom
 # square REMOVED (v12): no stretch — face-positioned so the shortest torso reaches the
 # bottom on its own; longer torsos bleed below the frame. story keeps its fill for now.
-BOTTOM_FILL = {"story"}
+BOTTOM_FILL = set()
 # formats where a floating person is slid straight DOWN until the shirt touches the plate
 # bottom (never stretched, never lifted). Longer torsos already exceed the bottom -> unchanged.
 BOTTOM_FLOOR = {"square"}
 # horizontal bleed toward the outer side (fraction of plate width)
 SIDE_SHIFT = 0.10
+SIDE_SHIFT_FMT = {"story": 0.25}
+# story: anchor each head-top to this fraction of frame height (heads sit just under the
+# labels, body bleeds off the bottom). worker aligns by opaque top so headwear never matters.
+TOP_ANCHOR_FMT = {"story": 0.647}
 PURPLE = (150, 60, 210)
 ALPHA_THRESH = 40
 import os
@@ -65,7 +69,7 @@ def grade(img):
     sc.putalpha(t.split()[3])
     out = Image.alpha_composite(img, sc); out.putalpha(a); return out
 
-def frame(person, fmt, side, zoom=1.0):
+def frame(person, fmt, side, zoom=1.0, face_cy=None, top_anchor=None):
     cw, ch = CANVAS.get(fmt, CANVAS["wide"])
     face = detect_face(person)
     if face is not None:
@@ -92,15 +96,21 @@ def frame(person, fmt, side, zoom=1.0):
     if face is not None:
         # place face center at (side-based x, FACE_CY*ch)
         fcx, fcy = (fx + fw / 2) * scale, (fy + fh / 2) * scale
-        target_cy = FACE_CY.get(fmt, 0.40) * ch
+        target_cy = (face_cy if face_cy is not None else FACE_CY.get(fmt, 0.40)) * ch
+        _shift = SIDE_SHIFT_FMT.get(fmt, SIDE_SHIFT)
         if side == "left":
-            target_cx = cw * (0.5 - SIDE_SHIFT)
+            target_cx = cw * (0.5 - _shift)
         elif side == "right":
-            target_cx = cw * (0.5 + SIDE_SHIFT)
+            target_cx = cw * (0.5 + _shift)
         else:
             target_cx = cw * 0.5
         x = int(target_cx - fcx)
         y = int(target_cy - fcy)
+        if top_anchor is not None:
+            # align the person's opaque TOP (head/hat) to a fixed line, regardless of headwear.
+            ob = person_bbox(person)
+            if ob is not None:
+                y = int(top_anchor * ch - ob[1])
         if fmt in BOTTOM_ANCHOR:
             y = ch - nh          # sit flush on the plate bottom
         elif fmt in BOTTOM_FLOOR:
@@ -130,7 +140,7 @@ def frame(person, fmt, side, zoom=1.0):
     return canvas
 
 @app.get("/")
-def health(): return jsonify(ok=True, service="factors-frame", version=14)
+def health(): return jsonify(ok=True, service="factors-frame", version=15)
 
 @app.post("/frame")
 def go():
@@ -138,10 +148,14 @@ def go():
     fmt = d.get("aspect", "wide"); side = d.get("side", "center")
     try: zoom = float(d.get("zoom", 1.0))
     except (TypeError, ValueError): zoom = 1.0
+    # top-anchor: explicit override wins, else the per-format default (story only)
+    ta = d.get("top_anchor", TOP_ANCHOR_FMT.get(fmt))
+    try: ta = float(ta) if ta is not None else None
+    except (TypeError, ValueError): ta = TOP_ANCHOR_FMT.get(fmt)
     r = requests.get(d["url"], timeout=30); r.raise_for_status()
     src = Image.open(io.BytesIO(r.content)).convert("RGBA")
     do_grade = str(d.get("grade", "yes")).lower() in ("yes","true","1","on")
-    img = frame(grade(src) if do_grade else src, fmt, side, zoom)
+    img = frame(grade(src) if do_grade else src, fmt, side, zoom, top_anchor=ta)
     buf = io.BytesIO(); img.save(buf, "PNG"); buf.seek(0)
     return send_file(buf, mimetype="image/png")
 
